@@ -4,6 +4,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from typing import List, Optional
 from bson import ObjectId
+import requests
 
 from database import db, create_document, get_documents
 
@@ -189,6 +190,51 @@ async def get_messages(a: str, b: str):
 async def submit_verification(v: Verification):
     verification_id = create_document("verification", v)
     return {"id": verification_id}
+
+
+# ----- Google Auth (ID token verify) -----
+class GoogleAuthRequest(BaseModel):
+    id_token: str
+
+
+@app.post("/api/auth/google")
+async def auth_google(body: GoogleAuthRequest):
+    try:
+        # Verify with Google's tokeninfo endpoint
+        tokeninfo_url = "https://oauth2.googleapis.com/tokeninfo"
+        r = requests.get(tokeninfo_url, params={"id_token": body.id_token}, timeout=10)
+        if r.status_code != 200:
+            raise HTTPException(status_code=401, detail="Invalid Google token")
+        info = r.json()
+        aud = info.get("aud")
+        client_id = os.getenv("GOOGLE_CLIENT_ID")
+        if client_id and aud != client_id:
+            raise HTTPException(status_code=401, detail="Token audience mismatch")
+        # Minimal profile payload
+        profile = {
+            "sub": info.get("sub"),
+            "email": info.get("email"),
+            "email_verified": info.get("email_verified"),
+            "name": info.get("name"),
+            "picture": info.get("picture"),
+            "given_name": info.get("given_name"),
+            "family_name": info.get("family_name"),
+        }
+        # Log activity
+        try:
+            create_document("activitylog", {
+                "user_id": profile.get("sub") or "unknown",
+                "user_type": "startup",  # placeholder until role chosen
+                "action": "google_sign_in",
+                "meta": {"email": profile.get("email")}
+            })
+        except Exception:
+            pass
+        return {"ok": True, "profile": profile}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e)[:200])
 
 
 # ----- Schema Introspection (for database viewer tooling) -----
